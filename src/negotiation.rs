@@ -5,7 +5,7 @@ use byte::*;
 ///
 /// Actions for telnet negotiation.
 ///
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum NegotiationAction {
     Will, Wont, Do, Dont
 }
