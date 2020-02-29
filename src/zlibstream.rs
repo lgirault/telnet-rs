@@ -69,6 +69,13 @@ impl <T> Stream for ZlibStream<T> where T: Stream {
             ZlibStreamSwitch::Encoded(ref stream) => stream.get_ref().set_read_timeout(dur)
         }
     }
+
+    fn shutdown(&self)-> Result<()> {
+        match self.stream {
+            ZlibStreamSwitch::Plain(ref stream) => stream.shutdown(),
+            ZlibStreamSwitch::Encoded(ref stream) => stream.get_ref().shutdown()
+        }
+    }
 }
 
 impl <T> ZCStream for ZlibStream<T> where T: Stream {

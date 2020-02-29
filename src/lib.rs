@@ -45,19 +45,23 @@ use event::TelnetEventQueue;
 use byte::*;
 
 #[cfg(feature = "zcstream")]
-type TStream = zcstream::ZCStream;
+type TStream = dyn zcstream::ZCStream;
 #[cfg(not(feature = "zcstream"))]
-type TStream = stream::Stream;
+type TStream = dyn stream::Stream;
 
 #[derive(Debug)]
 enum ProcessState {
     NormalData,
     IAC,
     SB,
-    SBData(TelnetOption, usize),    // (option, start location of option data)
-    SBDataIAC(TelnetOption, usize), // (option, start location of option data)
-    Will, Wont,
-    Do, Dont
+    SBData(TelnetOption, usize),
+    // (option, start location of option data)
+    SBDataIAC(TelnetOption, usize),
+    // (option, start location of option data)
+    Will,
+    Wont,
+    Do,
+    Dont,
 }
 
 ///
@@ -83,11 +87,10 @@ pub struct Telnet {
     buffer: Box<[u8]>,
     buffered_size: usize,
     process_buffer: Box<[u8]>,
-    process_buffered_size: usize
+    process_buffered_size: usize,
 }
 
 impl Telnet {
-
     ///
     /// Opens a telnet connection to a remote host using a `TcpStream`.
     ///
@@ -107,9 +110,9 @@ impl Telnet {
         let stream = TcpStream::connect(addr)?; // send the error out directly
 
         #[cfg(feature = "zcstream")]
-        return Ok(Telnet::from_stream(Box::new(ZlibStream::from_stream(stream)), buf_size));
+            return Ok(Telnet::from_stream(Box::new(ZlibStream::from_stream(stream)), buf_size));
         #[cfg(not(feature = "zcstream"))]
-        return Ok(Telnet::from_stream(Box::new(stream), buf_size));
+            return Ok(Telnet::from_stream(Box::new(stream), buf_size));
     }
 
     #[cfg(feature = "zcstream")]
@@ -137,7 +140,7 @@ impl Telnet {
             buffer: vec![0; actual_size].into_boxed_slice(),
             buffered_size: 0,
             process_buffer: vec![0; actual_size].into_boxed_slice(),
-            process_buffered_size: 0
+            process_buffered_size: 0,
         }
     }
 
@@ -168,7 +171,7 @@ impl Telnet {
             match self.stream.read(&mut self.buffer) {
                 Ok(size) => {
                     self.buffered_size = size;
-                },
+                }
                 Err(e) => return Err(e)
             }
 
@@ -211,7 +214,7 @@ impl Telnet {
             match self.stream.read(&mut self.buffer) {
                 Ok(size) => {
                     self.buffered_size = size;
-                },
+                }
                 Err(e) => {
                     if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut {
                         return Ok(TelnetEvent::TimedOut);
@@ -259,7 +262,7 @@ impl Telnet {
             match self.stream.read(&mut self.buffer) {
                 Ok(size) => {
                     self.buffered_size = size;
-                },
+                }
                 Err(e) => {
                     if e.kind() == ErrorKind::WouldBlock {
                         return Ok(TelnetEvent::NoData);
@@ -279,7 +282,6 @@ impl Telnet {
                 None => TelnetEvent::Error("Internal Queue error".to_string())
             }
         )
-
     }
 
     ///
@@ -301,7 +303,7 @@ impl Telnet {
         let mut start = 0;
         for i in 0..data.len() {
             if data[i] == BYTE_IAC {
-                self.stream.write(&data[start .. i + 1])?;
+                self.stream.write(&data[start..i + 1])?;
                 self.stream.write(&[BYTE_IAC])?;
                 write_size = write_size + (i + 1 - start);
                 start = i + 1;
@@ -309,7 +311,7 @@ impl Telnet {
         }
 
         if start < data.len() {
-            self.stream.write(&data[start .. data.len()])?;
+            self.stream.write(&data[start..data.len()])?;
             write_size = write_size + (data.len() - start);
         }
 
@@ -328,9 +330,13 @@ impl Telnet {
     /// connection.negotiate(NegotiationAction::Will, TelnetOption::Echo);
     /// ```
     ///
-    pub fn negotiate(&mut self, action: NegotiationAction, opt: TelnetOption) {
+    pub fn negotiate(&mut self, action: NegotiationAction, opt: TelnetOption) -> usize {
+        self.try_negotiate(action, opt).expect("Error sending negotiation")
+    }
+
+    pub fn try_negotiate(&mut self, action: NegotiationAction, opt: TelnetOption) -> io::Result<usize> {
         let buf: &[u8] = &[BYTE_IAC, action.to_byte(), opt.to_byte()];
-        self.stream.write(buf).expect("Error sending negotiation");
+        self.stream.write(buf)
     }
 
     ///
@@ -347,14 +353,35 @@ impl Telnet {
     /// connection.subnegotiate(TelnetOption::TTYPE, &data);
     /// ```
     ///
-    pub fn subnegotiate(&mut self, opt: TelnetOption, data: &[u8]) {
-        let buf: &[u8] = &[BYTE_IAC, BYTE_SB, opt.to_byte()];
-        self.stream.write(buf).expect("Error sending subnegotiation (START)");
+    pub fn subnegotiate(&mut self, opt: TelnetOption, data: &[u8]) -> usize {
+        self.try_subnegotiate(opt, &[data]).unwrap()
+    }
 
-        self.stream.write(data).expect("Error sending subnegotiation (DATA)");
+
+    pub fn try_subnegotiate(&mut self, opt: TelnetOption, data: &[&[u8]]) -> io::Result<usize> {
+        let buf: &[u8] = &[BYTE_IAC, BYTE_SB, opt.to_byte()];
+        let w1 = self.stream.write(buf).map_err(|_| -> io::Error {
+            io::Error::new(io::ErrorKind::Other,
+                           "Error sending subnegotiation (START)")
+        })?;
+
+
+        let mut w2 = 0;
+        for d in data.iter() {
+            w2 = w2 + self.stream.write(*d).map_err(|_| -> io::Error {
+                io::Error::new(io::ErrorKind::Other,
+                               "Error sending subnegotiation (DATA)")
+            })?;
+        }
+
 
         let buf: &[u8] = &[BYTE_IAC, BYTE_SE];
-        self.stream.write(buf).expect("Error sending subnegotiation (END)");
+        let w3 = self.stream.write(buf).map_err(|_| -> io::Error {
+            io::Error::new(io::ErrorKind::Other,
+                           "Error sending subnegotiation (END)")
+        })?;
+
+        Ok(w1 + w2 + w3)
     }
 
     fn process(&mut self) {
@@ -391,7 +418,7 @@ impl Telnet {
                         let data = self.copy_buffered_data(data_start, data_end);
                         self.event_queue.push_event(TelnetEvent::Data(data));
                     }
-                },
+                }
 
                 // Telnet Commands
                 ProcessState::IAC => {
@@ -416,7 +443,7 @@ impl Telnet {
                             // Update the state
                             state = ProcessState::NormalData;
                             data_start = current + 1;
-                        },
+                        }
                         // Unknown IAC commands
                         _ => {
                             state = ProcessState::NormalData;
@@ -424,43 +451,42 @@ impl Telnet {
                             self.event_queue.push_event(TelnetEvent::UnknownIAC(byte));
                         }
                     }
-                },
+                }
 
                 // Negotiation
                 ProcessState::Will | ProcessState::Wont |
-                        ProcessState::Do | ProcessState::Dont => {
-
+                ProcessState::Do | ProcessState::Dont => {
                     let opt = TelnetOption::parse(byte);
 
                     match state {
                         ProcessState::Will => {
                             self.event_queue.push_event(
                                 TelnetEvent::Negotiation(NegotiationAction::Will, opt));
-                        },
+                        }
                         ProcessState::Wont => {
                             self.event_queue.push_event(
                                 TelnetEvent::Negotiation(NegotiationAction::Wont, opt));
-                        },
+                        }
                         ProcessState::Do => {
                             self.event_queue.push_event(
                                 TelnetEvent::Negotiation(NegotiationAction::Do, opt));
-                        },
+                        }
                         ProcessState::Dont => {
                             self.event_queue.push_event(
                                 TelnetEvent::Negotiation(NegotiationAction::Dont, opt));
-                        },
+                        }
                         _ => {} // Do nothing
                     }
 
                     state = ProcessState::NormalData;
                     data_start = current + 1;
-                },
+                }
 
                 // Start subnegotiation
                 ProcessState::SB => {
                     let opt = TelnetOption::parse(byte);
                     state = ProcessState::SBData(opt, current + 1);
-                },
+                }
 
                 // Subnegotiation's data
                 ProcessState::SBData(opt, data_start) => {
@@ -470,7 +496,7 @@ impl Telnet {
 
                     // XXX: We may need to consider the case that a SB Data
                     // sequence may exceed this buffer
-                },
+                }
 
                 // IAC inside Subnegotiation's data
                 ProcessState::SBDataIAC(opt, sb_data_start) => {
@@ -485,7 +511,7 @@ impl Telnet {
                             let sb_data_end = current - 1;
                             let data = self.copy_buffered_data(sb_data_start, sb_data_end);
                             self.event_queue.push_event(TelnetEvent::Subnegotiation(opt, data));
-                        },
+                        }
                         // Escaping
                         // TODO: Write a test case for this
                         BYTE_IAC => {
@@ -498,7 +524,7 @@ impl Telnet {
 
                             // Update the state
                             state = ProcessState::SBData(opt, current + 1);
-                        },
+                        }
                         // TODO: Write a test case for this
                         b => {
                             self.event_queue.push_event(TelnetEvent::Error(
@@ -523,8 +549,8 @@ impl Telnet {
         let data_length = data_end - data_start;
         let dst_start = self.process_buffered_size;
         let dst_end = self.process_buffered_size + data_length;
-        let dst = &mut self.process_buffer[dst_start .. dst_end];
-        dst.copy_from_slice(&self.buffer[data_start .. data_end]);
+        let dst = &mut self.process_buffer[dst_start..dst_end];
+        dst.copy_from_slice(&self.buffer[data_start..data_end]);
         self.process_buffered_size += data_length;
     }
 
@@ -536,13 +562,17 @@ impl Telnet {
             let pbe = self.process_buffered_size;
             self.process_buffered_size = 0;
 
-            &self.process_buffer[0 .. pbe]
+            &self.process_buffer[0..pbe]
         } else {
-            &self.buffer[data_start .. data_end]
+            &self.buffer[data_start..data_end]
         };
 
         Box::from(data)
     }
+//
+//    fn shutdown(&mut self){
+//        self.stream.shutdown(Shutdown::Both);
+//    }
 }
 
 #[cfg(test)]
@@ -565,11 +595,11 @@ mod tests {
 
     impl stream::Stream for MockStream {
         fn set_nonblocking(&self, _nonblocking: bool) -> Result<(), Error> {
-            return Ok(())
+            return Ok(());
         }
 
         fn set_read_timeout(&self, _dur: Option<Duration>) -> Result<(), Error> {
-            return Ok(())
+            return Ok(());
         }
     }
 
@@ -586,11 +616,11 @@ mod tests {
 
     impl io::Write for MockStream {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            return Ok(buf.len())
+            return Ok(buf.len());
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            return Ok(())
+            return Ok(());
         }
     }
 
@@ -598,19 +628,19 @@ mod tests {
     fn escapes_double_iac_correctly() {
         let stream = MockStream::new(vec!(0x40, 0x5a, 0xff, 0xff, 0x31, 0x34));
         #[cfg(feature = "zcstream")]
-        let stream = ZlibStream::from_stream(stream);
+            let stream = ZlibStream::from_stream(stream);
         let stream = Box::new(stream);
 
         let mut telnet = Telnet::from_stream(stream, 6);
 
-        let expected_bytes_1: [u8;2] = [0x40, 0x5a];
-        let expected_bytes_2: [u8;3] = [0xff, 0x31, 0x34];
+        let expected_bytes_1: [u8; 2] = [0x40, 0x5a];
+        let expected_bytes_2: [u8; 3] = [0xff, 0x31, 0x34];
 
         let event_1 = telnet.read_nonblocking().unwrap();
         match event_1 {
             TelnetEvent::Data(buffer) => {
                 assert_eq!(buffer.deref(), &expected_bytes_1);
-            },
+            }
             _ => {
                 assert!(false);
             }
@@ -620,7 +650,7 @@ mod tests {
         match event_2 {
             TelnetEvent::Data(buffer) => {
                 assert_eq!(buffer.deref(), &expected_bytes_2);
-            },
+            }
             _ => {
                 assert!(false);
             }
