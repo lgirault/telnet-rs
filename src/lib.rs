@@ -37,18 +37,18 @@ pub use event::TelnetEvent;
 pub use negotiation::NegotiationAction;
 
 use std::io;
-use std::io::{Read, Write, ErrorKind};
-use std::net::{TcpStream, ToSocketAddrs};
-use std::time::Duration;
+use tokio::prelude::*;
+use tokio::net::{TcpStream,ToSocketAddrs};
 
 use event::TelnetEventQueue;
 use byte::*;
 
-#[cfg(feature = "zcstream")]
-type TStream = dyn zcstream::ZCStream;
-#[cfg(not(feature = "zcstream"))]
-type TStream = dyn stream::Stream;
-
+// #[cfg(feature = "zcstream")]
+// type TStream = dyn zcstream::ZCStream;
+// #[cfg(not(feature = "zcstream"))]
+// type TStream = dyn stream::Stream;
+type TStream = tokio::net::TcpStream;
+use std::borrow::BorrowMut;
 #[derive(Debug)]
 enum ProcessState {
     NormalData,
@@ -80,7 +80,7 @@ enum ProcessState {
 /// ```
 ///
 pub struct Telnet {
-    stream: Box<TStream>,
+    stream: Box<tokio::net::TcpStream>,
     event_queue: TelnetEventQueue,
 
     // Buffer
@@ -106,12 +106,12 @@ impl Telnet {
     ///         .expect("Couldn't connect to the server...");
     /// ```
     ///
-    pub fn connect<A: ToSocketAddrs>(addr: A, buf_size: usize) -> io::Result<Telnet> {
-        let stream = TcpStream::connect(addr)?; // send the error out directly
+    pub async fn connect<A: ToSocketAddrs>(addr: A, buf_size: usize) -> io::Result<Telnet> {
+        let stream = TcpStream::connect(addr).await?; // send the error out directly
 
-        #[cfg(feature = "zcstream")]
-            return Ok(Telnet::from_stream(Box::new(ZlibStream::from_stream(stream)), buf_size));
-        #[cfg(not(feature = "zcstream"))]
+        // #[cfg(feature = "zcstream")]
+        //     return Ok(Telnet::from_stream(Box::new(ZlibStream::from_stream(stream)), buf_size));
+        // #[cfg(not(feature = "zcstream"))]
             return Ok(Telnet::from_stream(Box::new(stream), buf_size));
     }
 
@@ -161,115 +161,19 @@ impl Telnet {
     /// println!("{:?}", event);
     /// ```
     ///
-    pub fn read(&mut self) -> io::Result<TelnetEvent> {
+    pub async fn read(&mut self) -> io::Result<TelnetEvent> {
         while self.event_queue.is_empty() {
             // Set stream settings
-            self.stream.set_nonblocking(false).expect("set_nonblocking call failed");
-            self.stream.set_read_timeout(None).expect("set_read_timeout call failed");
+            // (*self.stream)
+            //     .set_read_timeout(None).expect("set_read_timeout call failed");
 
             // Read bytes to the buffer
-            match self.stream.read(&mut self.buffer) {
+            match self.stream.read(&mut self.buffer).await {
+
                 Ok(size) => {
                     self.buffered_size = size;
                 }
                 Err(e) => return Err(e)
-            }
-
-            self.process();
-        }
-
-        // Return an event
-        Ok(
-            match self.event_queue.take_event() {
-                Some(x) => x,
-                None => TelnetEvent::Error("Internal Queue error".to_string())
-            }
-        )
-    }
-
-    ///
-    /// Reads a `TelnetEvent`, but the waiting time cannot exceed a given `Duration`.
-    ///
-    /// This method is similar to `read()`, but with a time limitation. If the given time was
-    /// reached, it would return `TelnetEvent::TimedOut`.
-    ///
-    /// # Examples
-    /// ```rust,should_panic
-    /// use std::time::Duration;
-    /// use telnet::Telnet;
-    ///
-    /// let mut connection = Telnet::connect(("127.0.0.1", 23), 256)
-    ///         .expect("Couldn't connect to the server...");
-    /// let event = connection.read_timeout(Duration::new(5, 0)).expect("Read Error");
-    /// println!("{:?}", event);
-    /// ```
-    ///
-    pub fn read_timeout(&mut self, timeout: Duration) -> io::Result<TelnetEvent> {
-        if self.event_queue.is_empty() {
-            // Set stream settings
-            self.stream.set_nonblocking(false).expect("set_nonblocking call failed");
-            self.stream.set_read_timeout(Some(timeout)).expect("set_read_timeout call failed");
-
-            // Read bytes to the buffer
-            match self.stream.read(&mut self.buffer) {
-                Ok(size) => {
-                    self.buffered_size = size;
-                }
-                Err(e) => {
-                    if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut {
-                        return Ok(TelnetEvent::TimedOut);
-                    } else {
-                        return Err(e);
-                    }
-                }
-            }
-
-            self.process();
-        }
-
-        // Return an event
-        Ok(
-            match self.event_queue.take_event() {
-                Some(x) => x,
-                None => TelnetEvent::Error("Internal Queue error".to_string())
-            }
-        )
-    }
-
-    ///
-    /// Reads a `TelnetEvent`. Return immediataly if there was no queued event and nothing to read.
-    ///
-    /// This method is a non-blocking version of `read()`. If there was no more data, it would
-    /// return `TelnetEvent::NoData`.
-    ///
-    /// # Examples
-    /// ```rust,should_panic
-    /// use telnet::Telnet;
-    ///
-    /// let mut connection = Telnet::connect(("127.0.0.1", 23), 256)
-    ///         .expect("Couldn't connect to the server...");
-    /// let event = connection.read_nonblocking().expect("Read Error");
-    /// println!("{:?}", event);
-    /// ```
-    ///
-    pub fn read_nonblocking(&mut self) -> io::Result<TelnetEvent> {
-        if self.event_queue.is_empty() {
-            // Set stream settings
-            self.stream.set_nonblocking(true).expect("set_nonblocking call failed");
-            self.stream.set_read_timeout(None).expect("set_read_timeout call failed");
-
-            // Read bytes to the buffer
-            match self.stream.read(&mut self.buffer) {
-                Ok(size) => {
-                    self.buffered_size = size;
-                }
-                Err(e) => {
-                    if e.kind() == ErrorKind::WouldBlock {
-                        return Ok(TelnetEvent::NoData);
-                    } else {
-                        return Err(e);
-                    }
-                }
             }
 
             self.process();
@@ -297,21 +201,21 @@ impl Telnet {
     /// connection.write(&buffer).expect("Write Error");
     /// ```
     ///
-    pub fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+    pub async fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         let mut write_size = 0;
 
         let mut start = 0;
         for i in 0..data.len() {
             if data[i] == BYTE_IAC {
-                self.stream.write(&data[start..i + 1])?;
-                self.stream.write(&[BYTE_IAC])?;
+                self.stream.write(&data[start..i + 1]).await?;
+                self.stream.write(&[BYTE_IAC]).await?;
                 write_size = write_size + (i + 1 - start);
                 start = i + 1;
             }
         }
 
         if start < data.len() {
-            self.stream.write(&data[start..data.len()])?;
+            self.stream.write(&data[start..data.len()]).await?;
             write_size = write_size + (data.len() - start);
         }
 
@@ -330,13 +234,13 @@ impl Telnet {
     /// connection.negotiate(NegotiationAction::Will, TelnetOption::Echo);
     /// ```
     ///
-    pub fn negotiate(&mut self, action: NegotiationAction, opt: TelnetOption) -> usize {
-        self.try_negotiate(action, opt).expect("Error sending negotiation")
+    pub async fn negotiate(&mut self, action: NegotiationAction, opt: TelnetOption) -> usize {
+        self.try_negotiate(action, opt).await.expect("Error sending negotiation")
     }
 
-    pub fn try_negotiate(&mut self, action: NegotiationAction, opt: TelnetOption) -> io::Result<usize> {
+    pub async fn try_negotiate(&mut self, action: NegotiationAction, opt: TelnetOption) -> io::Result<usize> {
         let buf: &[u8] = &[BYTE_IAC, action.to_byte(), opt.to_byte()];
-        self.stream.write(buf)
+        self.stream.write(buf).await
     }
 
     ///
@@ -353,14 +257,14 @@ impl Telnet {
     /// connection.subnegotiate(TelnetOption::TTYPE, &data);
     /// ```
     ///
-    pub fn subnegotiate(&mut self, opt: TelnetOption, data: &[u8]) -> usize {
-        self.try_subnegotiate(opt, &[data]).unwrap()
+    pub async fn subnegotiate(&mut self, opt: TelnetOption, data: &[u8]) -> usize {
+        self.try_subnegotiate(opt, &[data]).await.unwrap()
     }
 
 
-    pub fn try_subnegotiate(&mut self, opt: TelnetOption, data: &[&[u8]]) -> io::Result<usize> {
+    pub async fn try_subnegotiate(&mut self, opt: TelnetOption, data: &[&[u8]]) -> io::Result<usize> {
         let buf: &[u8] = &[BYTE_IAC, BYTE_SB, opt.to_byte()];
-        let w1 = self.stream.write(buf).map_err(|_| -> io::Error {
+        let w1 = self.stream.write(buf).await.map_err(|_| -> io::Error {
             io::Error::new(io::ErrorKind::Other,
                            "Error sending subnegotiation (START)")
         })?;
@@ -368,7 +272,7 @@ impl Telnet {
 
         let mut w2 = 0;
         for d in data.iter() {
-            w2 = w2 + self.stream.write(*d).map_err(|_| -> io::Error {
+            w2 = w2 + self.stream.write(*d).await.map_err(|_| -> io::Error {
                 io::Error::new(io::ErrorKind::Other,
                                "Error sending subnegotiation (DATA)")
             })?;
@@ -376,7 +280,7 @@ impl Telnet {
 
 
         let buf: &[u8] = &[BYTE_IAC, BYTE_SE];
-        let w3 = self.stream.write(buf).map_err(|_| -> io::Error {
+        let w3 = self.stream.write(buf).await.map_err(|_| -> io::Error {
             io::Error::new(io::ErrorKind::Other,
                            "Error sending subnegotiation (END)")
         })?;

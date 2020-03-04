@@ -1,6 +1,6 @@
 // This implements the Q method described in Section 7 of RFC 1143
 
-use byte::*;
+use crate::byte::*;
 
 ///
 /// Actions for telnet negotiation.
